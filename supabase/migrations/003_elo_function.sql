@@ -1,12 +1,14 @@
 -- PostgreSQL function for atomic Elo rating updates
 -- Called from elo-submit-match edge function
+-- Supports dynamic K-factor based on games played
 
 CREATE OR REPLACE FUNCTION update_elo_ratings(
   p_user_id UUID,
   p_place_a TEXT,
   p_place_b TEXT,
   p_winner TEXT,
-  p_k_factor FLOAT8 DEFAULT 24
+  p_k_base FLOAT8 DEFAULT 24,
+  p_k_min FLOAT8 DEFAULT 12
 )
 RETURNS JSON AS $$
 DECLARE
@@ -20,6 +22,9 @@ DECLARE
   v_score_b FLOAT8;
   v_new_rating_a FLOAT8;
   v_new_rating_b FLOAT8;
+  v_k_factor_a FLOAT8;
+  v_k_factor_b FLOAT8;
+  v_k_factor FLOAT8;
 BEGIN
   -- Lock and fetch ratings for both places (insert if not exists)
   INSERT INTO elo_ratings (user_id, place_id, rating, games_played)
@@ -41,7 +46,13 @@ BEGIN
   WHERE user_id = p_user_id AND place_id = p_place_b
   FOR UPDATE;
   
-  -- Calculate expected scores
+  -- Calculate dynamic K-factors: K = max(K_MIN, K_BASE - games_played/10)
+  -- Use average of both players' K-factors for fair update
+  v_k_factor_a := GREATEST(p_k_min, p_k_base - v_games_a::FLOAT8 / 10.0);
+  v_k_factor_b := GREATEST(p_k_min, p_k_base - v_games_b::FLOAT8 / 10.0);
+  v_k_factor := (v_k_factor_a + v_k_factor_b) / 2.0;
+  
+  -- Calculate expected scores (standard Elo formula)
   v_expected_a := 1.0 / (1.0 + POWER(10, (v_rating_b - v_rating_a) / 400.0));
   v_expected_b := 1.0 / (1.0 + POWER(10, (v_rating_a - v_rating_b) / 400.0));
   
@@ -54,11 +65,11 @@ BEGIN
     v_score_b := 1.0;
   END IF;
   
-  -- Calculate new ratings
-  v_new_rating_a := v_rating_a + p_k_factor * (v_score_a - v_expected_a);
-  v_new_rating_b := v_rating_b + p_k_factor * (v_score_b - v_expected_b);
+  -- Calculate new ratings with dynamic K
+  v_new_rating_a := v_rating_a + v_k_factor * (v_score_a - v_expected_a);
+  v_new_rating_b := v_rating_b + v_k_factor * (v_score_b - v_expected_b);
   
-  -- Update ratings
+  -- Update ratings and increment games_played
   UPDATE elo_ratings
   SET rating = v_new_rating_a,
       games_played = v_games_a + 1,
@@ -71,8 +82,9 @@ BEGIN
       updated_at = NOW()
   WHERE user_id = p_user_id AND place_id = p_place_b;
   
-  -- Return results
+  -- Return detailed results including K-factor used
   RETURN json_build_object(
+    'k_factor', v_k_factor,
     'place_a', json_build_object(
       'place_id', p_place_a,
       'old_rating', v_rating_a,

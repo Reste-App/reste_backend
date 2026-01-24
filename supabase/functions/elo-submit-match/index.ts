@@ -1,52 +1,32 @@
 // Elo Submit Match Edge Function
 // POST /elo/submit-match - Record pairwise comparison and update Elo ratings
+// Uses dynamic K-factor and standard Elo formula
 
 import { z } from 'https://deno.land/x/zod@v3.22.4/mod.ts'
-import { verifyAuth, ApiError, jsonResponse, errorResponse, corsHeaders, handleCors } from '../_shared/utils.ts'
+import { 
+  verifyAuth, 
+  ApiError, 
+  jsonResponse, 
+  errorResponse, 
+  corsHeaders, 
+  handleCors,
+  ELO_K_BASE,
+  ELO_K_MIN,
+  eloToDisplayScore,
+  PLACEMENT_MAX_COMPARISONS,
+  PLACEMENT_STABLE_THRESHOLD,
+} from '../_shared/utils.ts'
 
 const SubmitMatchSchema = z.object({
   placeAId: z.string().min(1),
   placeBId: z.string().min(1),
   winnerPlaceId: z.string().min(1),
+  // Optional: ID of the hotel being actively placed (usually placeA)
+  activeHotelId: z.string().optional(),
 }).refine(
   (data) => data.winnerPlaceId === data.placeAId || data.winnerPlaceId === data.placeBId,
   { message: 'Winner must be either placeA or placeB' }
 )
-
-const ELO_K = 24
-
-// Beli-style tier boundaries (score out of 10)
-const TIERS = {
-  LIKED:    { min: 6.7, max: 10.0 },  // Top tier
-  FINE:     { min: 3.4, max: 6.6 },   // Middle tier
-  DISLIKED: { min: 0.0, max: 3.3 },   // Bottom tier
-}
-
-/**
- * Calculate expected score for player A vs player B
- */
-function expectedScore(ratingA: number, ratingB: number): number {
-  return 1 / (1 + Math.pow(10, (ratingB - ratingA) / 400))
-}
-
-/**
- * Calculate score out of 10 using Beli-style tiers
- * - Sentiment determines which tier (LIKED: 6.7-10, FINE: 3.4-6.6, DISLIKED: 0-3.3)
- * - Elo rating determines position within that tier
- */
-function calculateScore10(rating: number, sentiment: string | null): number {
-  // Normalize Elo to 0-1 scale (1000 = 0, 2000 = 1)
-  const normalizedElo = Math.max(0, Math.min(1, (rating - 1000) / 1000))
-  
-  // Get tier based on sentiment
-  const tier = TIERS[sentiment as keyof typeof TIERS] || TIERS.FINE
-  const tierRange = tier.max - tier.min
-  
-  // Map normalized Elo to position within tier
-  const score = tier.min + (normalizedElo * tierRange)
-  
-  return Math.round(score * 10) / 10 // Round to 1 decimal
-}
 
 Deno.serve(async (req) => {
   // Handle CORS
@@ -82,14 +62,15 @@ Deno.serve(async (req) => {
 
     // Perform transaction: fetch ratings, calculate updates, write back
     // Note: Supabase Edge Functions don't have native transaction support via JS client
-    // We'll use a PostgreSQL function for atomic updates
+    // We'll use a PostgreSQL function for atomic updates with dynamic K-factor
 
     const { data: result, error: txError } = await supabaseAdmin.rpc('update_elo_ratings', {
       p_user_id: userId,
       p_place_a: data.placeAId,
       p_place_b: data.placeBId,
       p_winner: data.winnerPlaceId,
-      p_k_factor: ELO_K,
+      p_k_base: ELO_K_BASE,
+      p_k_min: ELO_K_MIN,
     })
 
     if (txError) {
@@ -112,6 +93,30 @@ Deno.serve(async (req) => {
       // Non-fatal, continue
     }
 
+    // Update placement session for active hotel (Beli-like stopping)
+    // Use placeA as the active hotel if not explicitly provided (placeA is always the "new" hotel)
+    const activeHotelId = data.activeHotelId || data.placeAId
+    let placementResult: { is_placed: boolean; comparisons_done: number; rank_position: number; stable_steps: number } | null = null
+
+    try {
+      // Call the SQL function to update placement session
+      const { data: sessionResult, error: sessionError } = await supabaseAdmin.rpc('update_placement_session', {
+        p_user_id: userId,
+        p_place_id: activeHotelId,
+        p_max_comparisons: PLACEMENT_MAX_COMPARISONS,
+        p_stable_threshold: PLACEMENT_STABLE_THRESHOLD,
+      })
+
+      if (sessionError) {
+        console.error('Placement session update error:', sessionError)
+      } else {
+        placementResult = sessionResult
+      }
+    } catch (err) {
+      console.error('Placement session update failed:', err)
+      // Non-fatal, continue
+    }
+
     // Get updated ratings
     const { data: updatedRatings } = await supabase
       .from('elo_ratings')
@@ -119,12 +124,14 @@ Deno.serve(async (req) => {
       .eq('user_id', userId)
       .in('place_id', [data.placeAId, data.placeBId])
 
-    // Calculate score10 for both
+    // Calculate display scores using sigmoid-based formula
     const ratingsWithScores = updatedRatings?.map(r => ({
       place_id: r.place_id,
       rating: r.rating,
       games_played: r.games_played,
-      score10: calculateScore10(r.rating, sentimentMap.get(r.place_id) || null),
+      displayScore: eloToDisplayScore(r.rating),
+      // Keep score10 for backward compatibility
+      score10: eloToDisplayScore(r.rating),
     }))
 
     // Get place names for feed event
@@ -166,7 +173,16 @@ Deno.serve(async (req) => {
 
     return jsonResponse({
       success: true,
+      kFactor: result?.k_factor,
       ratings: ratingsWithScores,
+      // Placement session result (Beli-like stopping)
+      placementSession: placementResult ? {
+        activeHotelId,
+        isPlaced: placementResult.is_placed,
+        comparisonsRemaining: Math.max(0, PLACEMENT_MAX_COMPARISONS - placementResult.comparisons_done),
+        rankPosition: placementResult.rank_position,
+        stableSteps: placementResult.stable_steps,
+      } : undefined,
     })
 
   } catch (error) {

@@ -2,9 +2,10 @@
 // PUT /stays/:place_id - Add/update hotel to user's list with status and sentiment
 
 import { z } from 'https://deno.land/x/zod@v3.22.4/mod.ts'
-import { verifyAuth, ApiError, jsonResponse, errorResponse, corsHeaders, handleCors } from '../_shared/utils.ts'
+import { verifyAuth, ApiError, jsonResponse, errorResponse, corsHeaders, handleCors, getSeedRating, eloToDisplayScore } from '../_shared/utils.ts'
 
 const StayBodySchema = z.object({
+  place_id: z.string().min(1),
   status: z.enum(['WANT', 'BEEN']),
   sentiment: z.enum(['LIKED', 'FINE', 'DISLIKED']).optional().nullable(),
   stayed_at: z.string().optional().nullable(), // ISO timestamp
@@ -31,26 +32,18 @@ Deno.serve(async (req) => {
   if (corsResponse) return corsResponse
 
   try {
-    // Only allow PUT
-    if (req.method !== 'PUT') {
+    // Only allow POST (for upsert) or PUT (legacy)
+    if (req.method !== 'POST' && req.method !== 'PUT') {
       throw new ApiError(405, 'Method not allowed')
     }
 
     // Verify authentication
     const { userId, supabase, supabaseAdmin } = await verifyAuth(req)
 
-    // Extract place_id from URL path
-    const url = new URL(req.url)
-    const pathParts = url.pathname.split('/')
-    const placeId = pathParts[pathParts.length - 1]
-    
-    if (!placeId) {
-      throw new ApiError(400, 'place_id is required in URL path')
-    }
-
-    // Parse and validate body
+    // Parse and validate body (place_id now comes from body)
     const body = await req.json()
     const data = StayBodySchema.parse(body)
+    const placeId = data.place_id
 
     // Upsert stay
     const { data: stay, error: stayError } = await supabase
@@ -74,23 +67,69 @@ Deno.serve(async (req) => {
       throw new ApiError(400, `Failed to upsert stay: ${stayError.message}`)
     }
 
-    // If status is BEEN, ensure elo_ratings row exists
+    // If status is BEEN, ensure elo_ratings row exists with sentiment-seeded rating
+    let eloRating: number | null = null
+    let displayScore: number | null = null
+    let isNewHotel = false
+    
     if (data.status === 'BEEN') {
-      const { error: eloError } = await supabase
+      // Check if elo_ratings row already exists
+      const { data: existingRating } = await supabase
         .from('elo_ratings')
-        .upsert({
-          user_id: userId,
-          place_id: placeId,
-          rating: 1500,
-          games_played: 0,
-        }, { 
-          onConflict: 'user_id,place_id',
-          ignoreDuplicates: true, // Don't overwrite existing ratings
-        })
+        .select('rating, games_played')
+        .eq('user_id', userId)
+        .eq('place_id', placeId)
+        .single()
+      
+      if (existingRating) {
+        // Rating exists - don't overwrite Elo, just update sentiment via stay
+        eloRating = existingRating.rating
+        displayScore = eloToDisplayScore(eloRating)
+      } else {
+        // New rating - seed based on sentiment
+        isNewHotel = true
+        const seedRating = getSeedRating(data.sentiment || null)
+        
+        const { data: newRating, error: eloError } = await supabase
+          .from('elo_ratings')
+          .insert({
+            user_id: userId,
+            place_id: placeId,
+            rating: seedRating,
+            games_played: 0,
+          })
+          .select('rating')
+          .single()
 
-      if (eloError) {
-        console.error('Elo rating init error:', eloError)
-        // Non-fatal, continue
+        if (eloError) {
+          console.error('Elo rating init error:', eloError)
+          // Non-fatal, continue
+        } else {
+          eloRating = newRating?.rating ?? seedRating
+          displayScore = eloToDisplayScore(eloRating)
+        }
+
+        // Create placement session for the new hotel (Beli-like stopping behavior)
+        const { error: sessionError } = await supabaseAdmin
+          .from('placement_sessions')
+          .upsert({
+            user_id: userId,
+            place_id: placeId,
+            comparisons_done: 0,
+            last_rank_position: null,
+            stable_steps: 0,
+            is_placed: false,
+            started_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          }, {
+            onConflict: 'user_id,place_id',
+            ignoreDuplicates: false,
+          })
+
+        if (sessionError) {
+          console.error('Placement session init error:', sessionError)
+          // Non-fatal, continue
+        }
       }
     }
 
@@ -133,6 +172,12 @@ Deno.serve(async (req) => {
     return jsonResponse({
       success: true,
       stay,
+      elo: eloRating ? {
+        rating: eloRating,
+        displayScore,
+      } : null,
+      // Indicates whether this is a newly added hotel (needs placement comparisons)
+      isNewHotel,
     })
 
   } catch (error) {
