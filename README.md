@@ -473,17 +473,28 @@ The backend implements two-tier caching:
 - Expected score: `1 / (1 + 10^((opponent_rating - your_rating) / 400))`
 - New rating: `rating + K * (actual_score - expected_score)`
 
-### Score out of 10
+### Score out of 10 (Beli-Style Tiers)
+
+Sentiment determines the tier, Elo determines position within that tier:
+
 ```typescript
-base10 = clamp((rating - 1000) / 100, 0, 10)
-sentiment_offset = { LIKED: +0.7, FINE: 0, DISLIKED: -0.7 }
-score10 = clamp(base10 + sentiment_offset, 0, 10)
+// Tier boundaries
+LIKED:    6.7 - 10.0  (top tier)
+FINE:     3.4 - 6.6   (middle tier)
+DISLIKED: 0.0 - 3.3   (bottom tier)
+
+// Formula
+normalizedElo = clamp((rating - 1000) / 1000, 0, 1)
+score10 = tier.min + (normalizedElo * tierRange)
 ```
 
 **Examples:**
-- Rating 1500, LIKED → `5.0 + 0.7 = 5.7`
-- Rating 1800, FINE → `8.0 + 0.0 = 8.0`
-- Rating 1200, DISLIKED → `2.0 - 0.7 = 1.3`
+- Rating 1500, LIKED → `6.7 + (0.5 * 3.3) = 8.4`
+- Rating 1800, LIKED → `6.7 + (0.8 * 3.3) = 9.3`
+- Rating 1500, FINE → `3.4 + (0.5 * 3.2) = 5.0`
+- Rating 1200, DISLIKED → `0.0 + (0.2 * 3.3) = 0.7`
+
+**Key insight:** All LIKED hotels score 6.7-10.0, all FINE hotels score 3.4-6.6, all DISLIKED hotels score 0.0-3.3. Elo battles determine ranking within each tier.
 
 ## Local Development
 

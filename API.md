@@ -232,35 +232,43 @@ All errors follow this format:
 
 ---
 
-## Score Calculation
+## Score Calculation (Beli-Style Tiers)
 
 ### Elo Rating
 - Default: 1500
 - K-factor: 24
 - Range: 0-3000 (typical: 1000-2000)
 
-### Score out of 10
+### Three Tiers (Like Beli)
+Sentiment determines which tier, Elo determines position within tier:
+
 ```
-base10 = clamp((elo_rating - 1000) / 100, 0, 10)
+LIKED:    6.7 - 10.0  (top tier - "I liked it!")
+FINE:     3.4 - 6.6   (middle tier - "It was fine")
+DISLIKED: 0.0 - 3.3   (bottom tier - "I didn't like it")
+```
 
-sentiment_offset:
-  LIKED    → +0.7
-  FINE     → +0.0
-  DISLIKED → -0.7
-
-score10 = clamp(base10 + sentiment_offset, 0, 10)
+### Formula
+```
+normalizedElo = clamp((rating - 1000) / 1000, 0, 1)
+score10 = tier.min + (normalizedElo * tierRange)
 ```
 
 ### Examples
-| Elo   | Sentiment | Base | Offset | Final |
-|-------|-----------|------|--------|-------|
-| 1000  | LIKED     | 0.0  | +0.7   | 0.7   |
-| 1500  | FINE      | 5.0  | 0.0    | 5.0   |
-| 1500  | LIKED     | 5.0  | +0.7   | 5.7   |
-| 1800  | DISLIKED  | 8.0  | -0.7   | 7.3   |
-| 2000  | LIKED     | 10.0 | +0.7   | 10.0* |
+| Elo   | Sentiment | Tier Range | Normalized | Final |
+|-------|-----------|------------|------------|-------|
+| 1000  | LIKED     | 6.7-10.0   | 0.0        | 6.7   |
+| 1500  | LIKED     | 6.7-10.0   | 0.5        | 8.4   |
+| 2000  | LIKED     | 6.7-10.0   | 1.0        | 10.0  |
+| 1500  | FINE      | 3.4-6.6    | 0.5        | 5.0   |
+| 1500  | DISLIKED  | 0.0-3.3    | 0.5        | 1.7   |
+| 1200  | DISLIKED  | 0.0-3.3    | 0.2        | 0.7   |
 
-\* Clamped to max 10.0
+### Key Behavior
+- All LIKED hotels always score above 6.7
+- All FINE hotels always score between 3.4-6.6
+- All DISLIKED hotels always score below 3.3
+- Elo battles only affect ranking within the same tier
 
 ---
 
@@ -296,6 +304,7 @@ interface RankedHotel {
   rating: number
   score10: number
   sentiment: Sentiment
+  tier: 'LIKED' | 'FINE' | 'DISLIKED'  // Beli-style tier
   games_played: number
   city?: string
   country?: string

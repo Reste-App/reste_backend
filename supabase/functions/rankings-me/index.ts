@@ -13,30 +13,36 @@ interface RankedHotel {
   rating: number // Elo rating
   games_played: number
   sentiment: string
-  score10: number // Computed score out of 10
+  score10: number // Computed score out of 10 (Beli-style tiers)
+  tier: string // LIKED | FINE | DISLIKED
   stayed_at?: string
   photo?: string
 }
 
-/**
- * Calculate sentiment offset for score10
- */
-function sentimentOffset(sentiment: string | null): number {
-  switch (sentiment) {
-    case 'LIKED': return 0.7
-    case 'DISLIKED': return -0.7
-    case 'FINE':
-    default: return 0.0
-  }
+// Beli-style tier boundaries (score out of 10)
+const TIERS = {
+  LIKED:    { min: 6.7, max: 10.0 },  // Top tier
+  FINE:     { min: 3.4, max: 6.6 },   // Middle tier
+  DISLIKED: { min: 0.0, max: 3.3 },   // Bottom tier
 }
 
 /**
- * Calculate score out of 10 from Elo rating and sentiment
+ * Calculate score out of 10 using Beli-style tiers
+ * - Sentiment determines which tier (LIKED: 6.7-10, FINE: 3.4-6.6, DISLIKED: 0-3.3)
+ * - Elo rating determines position within that tier
  */
 function calculateScore10(rating: number, sentiment: string | null): number {
-  const base10 = Math.max(0, Math.min(10, (rating - 1000) / 100))
-  const offset = sentimentOffset(sentiment)
-  return Math.max(0, Math.min(10, base10 + offset))
+  // Normalize Elo to 0-1 scale (1000 = 0, 2000 = 1)
+  const normalizedElo = Math.max(0, Math.min(1, (rating - 1000) / 1000))
+  
+  // Get tier based on sentiment
+  const tier = TIERS[sentiment as keyof typeof TIERS] || TIERS.FINE
+  const tierRange = tier.max - tier.min
+  
+  // Map normalized Elo to position within tier
+  const score = tier.min + (normalizedElo * tierRange)
+  
+  return Math.round(score * 10) / 10 // Round to 1 decimal
 }
 
 Deno.serve(async (req) => {
@@ -103,14 +109,17 @@ Deno.serve(async (req) => {
         rating,
         games_played: gamesPlayed,
         sentiment,
-        score10: Math.round(score10 * 10) / 10, // Round to 1 decimal
+        score10,
+        tier: sentiment || 'FINE',
         stayed_at: stay.stayed_at,
         photo: placeData?.details?.photos?.[0],
       }
     })
 
-    // Sort by rating descending (primary ordering)
-    rankings.sort((a, b) => b.rating - a.rating)
+    // Sort by score10 descending (respects Beli-style tiers)
+    // LIKED hotels always on top, then FINE, then DISLIKED
+    // Within each tier, sorted by Elo (reflected in score10)
+    rankings.sort((a, b) => b.score10 - a.score10)
 
     return jsonResponse({
       rankings,
