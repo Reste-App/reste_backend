@@ -6,6 +6,7 @@ import { verifyAuth, ApiError, jsonResponse, errorResponse, corsHeaders, handleC
 
 const DetailsParamsSchema = z.object({
   place_id: z.string().min(1),
+  refresh: z.string().optional(), // If "true", bypass cache
 })
 
 const CACHE_TTL_DAYS = 7
@@ -52,32 +53,40 @@ Deno.serve(async (req) => {
     const url = new URL(req.url)
     const params = DetailsParamsSchema.parse({
       place_id: url.searchParams.get('place_id'),
+      refresh: url.searchParams.get('refresh') || undefined,
     })
 
-    // Check cache first
-    const { data: cached, error: cacheError } = await supabaseAdmin
-      .from('place_cache')
-      .select('*')
-      .eq('place_id', params.place_id)
-      .single()
+    // Check if refresh is requested
+    const forceRefresh = params.refresh === 'true'
 
-    if (!cacheError && cached && cached.details) {
-      const updatedAt = new Date(cached.updated_at)
-      const now = new Date()
-      const daysSinceUpdate = (now.getTime() - updatedAt.getTime()) / (1000 * 60 * 60 * 24)
+    // Check cache first (unless refresh is requested)
+    if (!forceRefresh) {
+      const { data: cached, error: cacheError } = await supabaseAdmin
+        .from('place_cache')
+        .select('*')
+        .eq('place_id', params.place_id)
+        .single()
 
-      if (daysSinceUpdate < CACHE_TTL_DAYS) {
-        console.log(`Cache hit for place_id: ${params.place_id}`)
-        return jsonResponse({
-          ...cached.details,
-          place_id: cached.place_id,
-          cached: true,
-        })
+      if (!cacheError && cached && cached.details) {
+        const updatedAt = new Date(cached.updated_at)
+        const now = new Date()
+        const daysSinceUpdate = (now.getTime() - updatedAt.getTime()) / (1000 * 60 * 60 * 24)
+
+        if (daysSinceUpdate < CACHE_TTL_DAYS) {
+          console.log(`Cache hit for place_id: ${params.place_id}`)
+          return jsonResponse({
+            ...cached.details,
+            place_id: cached.place_id,
+            cached: true,
+          })
+        }
       }
+    } else {
+      console.log(`Cache bypass requested for place_id: ${params.place_id}`)
     }
 
-    // Cache miss or expired - fetch from Google
-    console.log(`Cache miss for place_id: ${params.place_id}, fetching from Google`)
+    // Cache miss, expired, or refresh requested - fetch from Google
+    console.log(`Fetching from Google for place_id: ${params.place_id}`)
 
     const googleApiKey = Deno.env.get('GOOGLE_PLACES_API_KEY')
     if (!googleApiKey) {
@@ -125,6 +134,45 @@ Deno.serve(async (req) => {
 
     const place = detailsData
 
+    // Fetch actual photo URLs from Google Photos API and cache them
+    // This saves Photo API credits on subsequent requests
+    const photoUrls: string[] = []
+    const maxPhotos = Math.min((place.photos?.length || 0), 10)
+
+    for (let i = 0; i < maxPhotos; i++) {
+      const photoName = place.photos[i]?.name
+      if (photoName) {
+        // Build the photo URL with skipHttpRedirect to get the actual CDN URL
+        // This way we cache the direct Google CDN link instead of the photo reference
+        const photoApiUrl = `https://places.googleapis.com/v1/${photoName}/media?key=${googleApiKey}&maxWidthPx=400&maxHeightPx=300&skipHttpRedirect=true`
+
+        try {
+          const photoResponse = await fetch(photoApiUrl, {
+            method: 'GET',
+          })
+
+          if (photoResponse.ok) {
+            const photoData = await photoResponse.json()
+            // photoData.photoUri contains the actual Google CDN URL
+            if (photoData.photoUri) {
+              photoUrls.push(photoData.photoUri)
+              console.log(`Resolved photo ${i + 1}/${maxPhotos}: ${photoData.photoUri}`)
+            }
+          }
+        } catch (error) {
+          console.error(`Failed to fetch photo URL ${i}:`, error)
+          // If photo URL fetch fails, fall back to the reference
+          photoUrls.push(photoName)
+        }
+      }
+    }
+
+    // Debug logging to see what Google returns
+    console.log('Google Places API response keys:', Object.keys(place))
+    console.log('Has photos?', !!place.photos)
+    console.log('Photos count:', place.photos?.length || 0)
+    console.log('Photos sample:', place.photos?.slice(0, 2))
+
     // Extract city and country from addressComponents
     let city: string | null = null
     let country: string | null = null
@@ -162,7 +210,9 @@ Deno.serve(async (req) => {
       rating: place.rating,
       user_rating_count: place.userRatingCount,
       price_level: place.priceLevel,
-      photos: place.photos?.map((p: any) => p.name).slice(0, 10) || [],
+      // Use resolved photo URLs (direct Google CDN links) instead of photo references
+      // This avoids Photo API calls on every render
+      photos: photoUrls.length > 0 ? photoUrls : place.photos?.map((p: any) => p.name).slice(0, 10) || [],
       reviews: place.reviews?.slice(0, 5) || [],
       opening_hours: place.regularOpeningHours || place.currentOpeningHours,
       lat: place.location?.latitude,
@@ -172,6 +222,11 @@ Deno.serve(async (req) => {
       city,
       country,
     }
+
+    // Debug logging to see what we're returning
+    console.log('Returning placeDetails keys:', Object.keys(placeDetails))
+    console.log('Returning photos count:', placeDetails.photos?.length || 0)
+    console.log('Sample photos:', placeDetails.photos?.slice(0, 2))
 
     // Update cache
     await supabaseAdmin
