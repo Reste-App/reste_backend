@@ -10,9 +10,11 @@ import {
   corsHeaders, 
   handleCors, 
   MARK_THRESHOLD, 
-  eloToDisplayScore,
   getSentimentTier,
   PLACEMENT_MAX_COMPARISONS,
+  computeDisplayScoresForHotels,
+  getDisplayScoreFromResults,
+  type SentimentTier,
 } from '../_shared/utils.ts'
 
 interface PlaceInfo {
@@ -429,6 +431,14 @@ Deno.serve(async (req) => {
 
     const { placeA, placeB } = selectedPair
 
+    // Compute tier-percentile display scores for all candidates
+    const hotelsForScoring = candidates.map(c => ({
+      place_id: c.place_id,
+      rating: c.rating,
+      sentiment: (c.sentiment || 'FINE') as SentimentTier,
+    }))
+    const displayScoreResults = computeDisplayScoresForHotels(hotelsForScoring)
+
     // Fetch place details from cache
     const { data: placesData } = await supabase
       .from('place_cache')
@@ -437,9 +447,11 @@ Deno.serve(async (req) => {
 
     const placeMap = new Map(placesData?.map((p: any) => [p.place_id, p]) || [])
 
-    // Build response with display scores
+    // Build response with tier-percentile display scores
     const placeAData = placeMap.get(placeA.place_id)
     const placeBData = placeMap.get(placeB.place_id)
+    const placeADisplayScore = getDisplayScoreFromResults(displayScoreResults, placeA.place_id) ?? 5.0
+    const placeBDisplayScore = getDisplayScoreFromResults(displayScoreResults, placeB.place_id) ?? 5.0
 
     const result: BattlePairResponse = {
       enabled: true,
@@ -452,7 +464,7 @@ Deno.serve(async (req) => {
           country: placeAData?.country,
           photo: placeAData?.details?.photos?.[0],
           rating: placeA.rating,
-          displayScore: eloToDisplayScore(placeA.rating),
+          displayScore: placeADisplayScore,
           gamesPlayed: placeA.games_played,
         },
         placeB: {
@@ -461,7 +473,7 @@ Deno.serve(async (req) => {
           country: placeBData?.country,
           photo: placeBData?.details?.photos?.[0],
           rating: placeB.rating,
-          displayScore: eloToDisplayScore(placeB.rating),
+          displayScore: placeBDisplayScore,
           gamesPlayed: placeB.games_played,
         },
       },

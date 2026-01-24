@@ -1,7 +1,16 @@
 // Rankings Edge Function
 // GET /rankings/me - Get user's ranked list of BEEN hotels
 
-import { verifyAuth, ApiError, jsonResponse, errorResponse, corsHeaders, handleCors } from '../_shared/utils.ts'
+import { 
+  verifyAuth, 
+  ApiError, 
+  jsonResponse, 
+  errorResponse, 
+  corsHeaders, 
+  handleCors,
+  computeDisplayScoresForHotels,
+  type SentimentTier,
+} from '../_shared/utils.ts'
 
 interface RankedHotel {
   place_id: string
@@ -13,36 +22,10 @@ interface RankedHotel {
   rating: number // Elo rating
   games_played: number
   sentiment: string
-  score10: number // Computed score out of 10 (Beli-style tiers)
+  score10: number // Computed score out of 10 (tier-percentile based)
   tier: string // LIKED | FINE | DISLIKED
   stayed_at?: string
   photo?: string
-}
-
-// Beli-style tier boundaries (score out of 10)
-const TIERS = {
-  LIKED:    { min: 6.7, max: 10.0 },  // Top tier
-  FINE:     { min: 3.4, max: 6.6 },   // Middle tier
-  DISLIKED: { min: 0.0, max: 3.3 },   // Bottom tier
-}
-
-/**
- * Calculate score out of 10 using Beli-style tiers
- * - Sentiment determines which tier (LIKED: 6.7-10, FINE: 3.4-6.6, DISLIKED: 0-3.3)
- * - Elo rating determines position within that tier
- */
-function calculateScore10(rating: number, sentiment: string | null): number {
-  // Normalize Elo to 0-1 scale (1000 = 0, 2000 = 1)
-  const normalizedElo = Math.max(0, Math.min(1, (rating - 1000) / 1000))
-  
-  // Get tier based on sentiment
-  const tier = TIERS[sentiment as keyof typeof TIERS] || TIERS.FINE
-  const tierRange = tier.max - tier.min
-  
-  // Map normalized Elo to position within tier
-  const score = tier.min + (normalizedElo * tierRange)
-  
-  return Math.round(score * 10) / 10 // Round to 1 decimal
 }
 
 Deno.serve(async (req) => {
@@ -90,7 +73,21 @@ Deno.serve(async (req) => {
       return jsonResponse({ rankings: [] })
     }
 
-    // Transform and calculate scores
+    // Extract hotel data for percentile calculation
+    const hotelsForScoring = stays.map((stay: any) => {
+      const eloData = Array.isArray(stay.elo_ratings) ? stay.elo_ratings[0] : stay.elo_ratings
+      return {
+        place_id: stay.place_id,
+        rating: eloData?.rating || 1500,
+        sentiment: (stay.sentiment || 'FINE') as SentimentTier,
+      }
+    })
+
+    // Compute percentile-based display scores for all hotels
+    const displayScoreResults = computeDisplayScoresForHotels(hotelsForScoring)
+    const scoreMap = new Map(displayScoreResults.map(r => [r.place_id, r.displayScore]))
+
+    // Transform and assign scores
     const rankings: RankedHotel[] = stays.map((stay: any) => {
       const eloData = Array.isArray(stay.elo_ratings) ? stay.elo_ratings[0] : stay.elo_ratings
       const placeData = Array.isArray(stay.place_cache) ? stay.place_cache[0] : stay.place_cache
@@ -98,7 +95,7 @@ Deno.serve(async (req) => {
       const rating = eloData?.rating || 1500
       const gamesPlayed = eloData?.games_played || 0
       const sentiment = stay.sentiment
-      const score10 = calculateScore10(rating, sentiment)
+      const score10 = scoreMap.get(stay.place_id) ?? 5.0 // fallback to midpoint
 
       return {
         place_id: stay.place_id,
@@ -118,7 +115,7 @@ Deno.serve(async (req) => {
 
     // Sort by score10 descending (respects Beli-style tiers)
     // LIKED hotels always on top, then FINE, then DISLIKED
-    // Within each tier, sorted by Elo (reflected in score10)
+    // Within each tier, sorted by percentile rank (reflected in score10)
     rankings.sort((a, b) => b.score10 - a.score10)
 
     return jsonResponse({

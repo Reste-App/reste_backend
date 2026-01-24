@@ -12,9 +12,9 @@ import {
   handleCors,
   ELO_K_BASE,
   ELO_K_MIN,
-  eloToDisplayScore,
   PLACEMENT_MAX_COMPARISONS,
   PLACEMENT_STABLE_THRESHOLD,
+  updateStoredDisplayScores,
 } from '../_shared/utils.ts'
 
 const SubmitMatchSchema = z.object({
@@ -117,21 +117,24 @@ Deno.serve(async (req) => {
       // Non-fatal, continue
     }
 
-    // Get updated ratings
+    // Update stored display scores for all user's hotels (tier-percentile based)
+    // This ensures scores are cached in DB for efficient reads
+    await updateStoredDisplayScores(supabaseAdmin, userId)
+
+    // Fetch updated ratings with stored display scores for the matched pair
     const { data: updatedRatings } = await supabase
       .from('elo_ratings')
-      .select('place_id, rating, games_played')
+      .select('place_id, rating, games_played, display_score')
       .eq('user_id', userId)
       .in('place_id', [data.placeAId, data.placeBId])
 
-    // Calculate display scores using sigmoid-based formula
-    const ratingsWithScores = updatedRatings?.map(r => ({
+    const ratingsWithScores = (updatedRatings || []).map(r => ({
       place_id: r.place_id,
       rating: r.rating,
       games_played: r.games_played,
-      displayScore: eloToDisplayScore(r.rating),
+      displayScore: r.display_score ?? 5.0,
       // Keep score10 for backward compatibility
-      score10: eloToDisplayScore(r.rating),
+      score10: r.display_score ?? 5.0,
     }))
 
     // Get place names for feed event

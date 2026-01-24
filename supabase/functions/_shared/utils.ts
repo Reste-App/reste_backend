@@ -54,13 +54,183 @@ export function getSentimentTier(rating: number): 'LIKED' | 'FINE' | 'DISLIKED' 
 // =============================================================================
 
 /**
- * Calculate display score (0.0 - 10.0) from Elo rating
- * Uses sigmoid function centered at 1500 with scale factor 200
- * Formula: 10 * (1 / (1 + exp(-(rating - 1500) / 200)))
+ * Display score bands by sentiment tier (Beli-style)
+ */
+export const DISPLAY_SCORE_BANDS = {
+  LIKED: { min: 6.7, max: 10.0 },
+  FINE: { min: 3.4, max: 6.7 },
+  DISLIKED: { min: 0.0, max: 3.4 },
+} as const
+
+export type SentimentTier = 'LIKED' | 'FINE' | 'DISLIKED'
+
+/**
+ * @deprecated Use computePercentileDisplayScore for tier-percentile based scoring
+ * Legacy sigmoid-based display score calculation
  */
 export function eloToDisplayScore(rating: number): number {
   const score = 10 * (1 / (1 + Math.exp(-(rating - 1500) / 200)))
   return Math.round(score * 10) / 10 // Round to 1 decimal
+}
+
+/**
+ * Compute percentile-based display score for a hotel within its sentiment tier
+ * 
+ * @param rankIndex - 0-based rank index (0 = lowest rating in tier)
+ * @param totalInTier - Total number of hotels in the tier
+ * @param sentiment - The sentiment tier (LIKED, FINE, DISLIKED)
+ * @returns Display score (0.0 - 10.0), rounded to 1 decimal
+ */
+export function computePercentileDisplayScore(
+  rankIndex: number,
+  totalInTier: number,
+  sentiment: SentimentTier | null
+): number {
+  const tier = sentiment || 'FINE'
+  const band = DISPLAY_SCORE_BANDS[tier] || DISPLAY_SCORE_BANDS.FINE
+  
+  // Compute percentile: p = rankIndex / max(1, n-1)
+  // For n=1: p=0 -> score is band midpoint
+  // For n=2: indices 0,1 -> p=0, p=1 -> min, max
+  const n = Math.max(1, totalInTier)
+  const percentile = n <= 1 ? 0.5 : rankIndex / (n - 1)
+  
+  // Map percentile to band
+  const displayScore = band.min + percentile * (band.max - band.min)
+  
+  // Round to 1 decimal and clamp to [0, 10]
+  return Math.round(Math.max(0, Math.min(10, displayScore)) * 10) / 10
+}
+
+/**
+ * Result type for batch display score computation
+ */
+export interface HotelDisplayScoreResult {
+  place_id: string
+  rating: number
+  sentiment: SentimentTier | null
+  displayScore: number
+  rankInTier: number
+  totalInTier: number
+}
+
+/**
+ * Compute display scores for a list of hotels using tier-percentile method
+ * Hotels are grouped by sentiment tier, sorted by Elo within each tier,
+ * and assigned display scores based on their percentile rank within the tier.
+ * 
+ * @param hotels - Array of hotels with place_id, rating, and sentiment
+ * @returns Array of hotels with computed displayScore and rank info
+ */
+export function computeDisplayScoresForHotels(
+  hotels: Array<{ place_id: string; rating: number; sentiment: SentimentTier | null }>
+): HotelDisplayScoreResult[] {
+  // Group hotels by sentiment tier
+  const tierGroups = new Map<SentimentTier, typeof hotels>()
+  
+  for (const hotel of hotels) {
+    const tier = (hotel.sentiment as SentimentTier) || 'FINE'
+    if (!tierGroups.has(tier)) {
+      tierGroups.set(tier, [])
+    }
+    tierGroups.get(tier)!.push(hotel)
+  }
+  
+  const results: HotelDisplayScoreResult[] = []
+  
+  // Process each tier
+  for (const [tier, tierHotels] of tierGroups) {
+    // Sort by rating ascending (lowest = rank 0)
+    const sorted = [...tierHotels].sort((a, b) => a.rating - b.rating)
+    const totalInTier = sorted.length
+    
+    // Compute display scores for each hotel in this tier
+    for (let i = 0; i < sorted.length; i++) {
+      const hotel = sorted[i]
+      const displayScore = computePercentileDisplayScore(i, totalInTier, tier)
+      
+      results.push({
+        place_id: hotel.place_id,
+        rating: hotel.rating,
+        sentiment: hotel.sentiment,
+        displayScore,
+        rankInTier: i,
+        totalInTier,
+      })
+    }
+  }
+  
+  return results
+}
+
+/**
+ * Get display score for specific hotels from a pre-computed results array
+ */
+export function getDisplayScoreFromResults(
+  results: HotelDisplayScoreResult[],
+  placeId: string
+): number | null {
+  const result = results.find(r => r.place_id === placeId)
+  return result?.displayScore ?? null
+}
+
+/**
+ * Update stored display scores for all hotels in the user's collection.
+ * Call this after any rating change (new stay, elo match).
+ * 
+ * @param supabase - Supabase client (admin recommended for bypassing RLS)
+ * @param userId - User ID
+ * @returns Number of records updated
+ */
+export async function updateStoredDisplayScores(
+  supabase: ReturnType<typeof createClient>,
+  userId: string
+): Promise<number> {
+  // Fetch all BEEN hotels with ratings and sentiments
+  const { data: stays, error: staysError } = await supabase
+    .from('stays')
+    .select(`
+      place_id,
+      sentiment,
+      elo_ratings (
+        rating
+      )
+    `)
+    .eq('user_id', userId)
+    .eq('status', 'BEEN')
+
+  if (staysError || !stays || stays.length === 0) {
+    return 0
+  }
+
+  // Build hotels array for scoring
+  const hotelsForScoring = stays.map((stay: any) => {
+    const eloData = Array.isArray(stay.elo_ratings) ? stay.elo_ratings[0] : stay.elo_ratings
+    return {
+      place_id: stay.place_id,
+      rating: eloData?.rating || 1500,
+      sentiment: (stay.sentiment || 'FINE') as SentimentTier,
+    }
+  })
+
+  // Compute display scores
+  const displayScoreResults = computeDisplayScoresForHotels(hotelsForScoring)
+
+  // Batch update elo_ratings with computed display scores
+  let updatedCount = 0
+  for (const result of displayScoreResults) {
+    const { error } = await supabase
+      .from('elo_ratings')
+      .update({ display_score: result.displayScore })
+      .eq('user_id', userId)
+      .eq('place_id', result.place_id)
+
+    if (!error) {
+      updatedCount++
+    }
+  }
+
+  return updatedCount
 }
 
 /**

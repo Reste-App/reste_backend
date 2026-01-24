@@ -2,13 +2,24 @@
 // PUT /stays/:place_id - Add/update hotel to user's list with status and sentiment
 
 import { z } from 'https://deno.land/x/zod@v3.22.4/mod.ts'
-import { verifyAuth, ApiError, jsonResponse, errorResponse, corsHeaders, handleCors, getSeedRating, eloToDisplayScore } from '../_shared/utils.ts'
+import { 
+  verifyAuth, 
+  ApiError, 
+  jsonResponse, 
+  errorResponse, 
+  corsHeaders, 
+  handleCors, 
+  getSeedRating, 
+  updateStoredDisplayScores,
+} from '../_shared/utils.ts'
 
 const StayBodySchema = z.object({
   place_id: z.string().min(1),
   status: z.enum(['WANT', 'BEEN']),
   sentiment: z.enum(['LIKED', 'FINE', 'DISLIKED']).optional().nullable(),
   stayed_at: z.string().optional().nullable(), // ISO timestamp
+  notes: z.string().optional().nullable(), // User notes about the stay
+  photos: z.array(z.string()).optional().nullable(), // Array of photo URLs
 }).refine(
   (data) => {
     // If status is BEEN, sentiment is required
@@ -54,6 +65,8 @@ Deno.serve(async (req) => {
         status: data.status,
         sentiment: data.sentiment || null,
         stayed_at: data.stayed_at || null,
+        notes: data.notes || null,
+        photos: data.photos || [],
         updated_at: new Date().toISOString(),
       }, { 
         onConflict: 'user_id,place_id',
@@ -84,7 +97,6 @@ Deno.serve(async (req) => {
       if (existingRating) {
         // Rating exists - don't overwrite Elo, just update sentiment via stay
         eloRating = existingRating.rating
-        displayScore = eloToDisplayScore(eloRating)
       } else {
         // New rating - seed based on sentiment
         isNewHotel = true
@@ -106,7 +118,6 @@ Deno.serve(async (req) => {
           // Non-fatal, continue
         } else {
           eloRating = newRating?.rating ?? seedRating
-          displayScore = eloToDisplayScore(eloRating)
         }
 
         // Create placement session for the new hotel (Beli-like stopping behavior)
@@ -131,6 +142,20 @@ Deno.serve(async (req) => {
           // Non-fatal, continue
         }
       }
+
+      // Update stored display scores for all user's hotels (tier-percentile based)
+      // This ensures scores are cached in DB for efficient reads
+      await updateStoredDisplayScores(supabaseAdmin, userId)
+
+      // Fetch the computed display score for this hotel
+      const { data: updatedRating } = await supabase
+        .from('elo_ratings')
+        .select('display_score')
+        .eq('user_id', userId)
+        .eq('place_id', placeId)
+        .single()
+
+      displayScore = updatedRating?.display_score ?? 5.0
     }
 
     // Get user profile for feed event
