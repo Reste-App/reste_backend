@@ -73,11 +73,21 @@ supabase secrets set SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 
 ### 3. Run Database Migrations
 
+**✅ Database already set up via Supabase MCP!**
+
+The database schema has been successfully deployed with:
+- 8 tables (profiles, follows, stays, posts, elo_ratings, elo_matches, feed_events, place_cache)
+- 21 RLS policies
+- 15 indexes
+- 2 PostgreSQL functions
+- 3 triggers
+
+See `DATABASE_SETUP.md` for full deployment details.
+
+If you need to apply migrations manually:
 ```bash
 supabase db push
 ```
-
-This will create all tables, RLS policies, and PostgreSQL functions.
 
 ### 4. Deploy Edge Functions
 

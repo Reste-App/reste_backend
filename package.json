@@ -1,0 +1,30 @@
+{
+  "name": "stayca",
+  "version": "1.0.0",
+  "description": "Beli for Hotels - Social hotel ranking app with Elo ratings",
+  "type": "module",
+  "scripts": {
+    "db:push": "npx supabase db push",
+    "db:reset": "npx supabase db reset",
+    "db:types": "npx supabase gen types typescript --local > types/database.ts",
+    "functions:serve": "npx supabase functions serve --env-file .env",
+    "functions:deploy": "./deploy.sh",
+    "deploy": "./deploy.sh",
+    "start": "npx supabase start",
+    "stop": "npx supabase stop",
+    "status": "npx supabase status",
+    "logs": "npx supabase functions logs",
+    "link": "npx supabase link",
+    "secrets:list": "npx supabase secrets list",
+    "secrets:set": "npx supabase secrets set"
+  },
+  "keywords": ["supabase", "hotels", "elo", "ranking"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "supabase": "^2.72.8",
+    "typescript": "^5.3.0",
+    "zod": "^3.22.4"
+  }
+}

@@ -5,12 +5,17 @@ set -e
 
 echo "🚀 Deploying Stayca Backend..."
 
-# Check if Supabase CLI is installed
-if ! command -v supabase &> /dev/null; then
-    echo "❌ Supabase CLI not found. Please install it first:"
-    echo "   https://supabase.com/docs/guides/cli/getting-started"
+# Check if Supabase CLI is available (local or global)
+if command -v supabase &> /dev/null; then
+    SUPABASE_CMD="supabase"
+elif [ -f "node_modules/.bin/supabase" ]; then
+    SUPABASE_CMD="npx supabase"
+else
+    echo "❌ Supabase CLI not found. Please run: npm install"
     exit 1
 fi
+
+echo "Using: $SUPABASE_CMD"
 
 # List of edge functions to deploy
 FUNCTIONS=(
@@ -31,15 +36,14 @@ echo "📦 Deploying ${#FUNCTIONS[@]} edge functions..."
 # Deploy each function
 for func in "${FUNCTIONS[@]}"; do
     echo "  → Deploying $func..."
-    supabase functions deploy "$func" --no-verify-jwt
+    $SUPABASE_CMD functions deploy "$func" --no-verify-jwt
 done
 
 echo ""
 echo "✅ All functions deployed successfully!"
 echo ""
 echo "⚙️  Don't forget to set secrets:"
-echo "   supabase secrets set GOOGLE_PLACES_API_KEY=your-key"
-echo "   supabase secrets set SUPABASE_SERVICE_ROLE_KEY=your-key"
+echo "   npx supabase secrets set GOOGLE_PLACES_API_KEY=your-key"
+echo "   npx supabase secrets set SUPABASE_SERVICE_ROLE_KEY=your-key"
 echo ""
-echo "🗄️  Run migrations if needed:"
-echo "   supabase db push"
+echo "🗄️  Database already set up via MCP."

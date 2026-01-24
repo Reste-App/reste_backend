@@ -18,8 +18,8 @@ build/
 .next/
 
 # IDE
-.vscode/
 .idea/
+# Keep .vscode for Deno settings
 *.swp
 *.swo
 *~
