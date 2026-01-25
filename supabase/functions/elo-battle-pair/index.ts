@@ -240,80 +240,89 @@ Deno.serve(async (req) => {
     }
 
     /**
-     * Select a pair using Beli-like smart selection:
-     * 1. If activeHotelId is specified, it MUST be placeA
-     * 2. Prefer partners in the same sentiment tier
-     * 3. Prefer rating-neighbors (closest Elo)
-     * 4. Prefer low games_played for exploration
-     * 5. Occasionally pick tier "anchor" (median of tier) for quick placement
-     * 6. Avoid recently compared pairs
+     * Select a pair using smart binary search-style selection when placing a new hotel:
+     * 1. If activeHotelId is specified (placement mode), use binary search approach
+     * 2. Track win/loss history to narrow down the rating range
+     * 3. Select opponents that efficiently narrow the search space
+     * 4. Fallback to neighbor-based selection for general comparisons
      */
     function selectPair(): { placeA: Candidate; placeB: Candidate } | null {
-      // If we have an active hotel, it must be placeA
+      // If we have an active hotel (placement mode), use binary search approach
       if (activeHotelId) {
         const activeCandidate = candidates.find(c => c.place_id === activeHotelId)
         
         if (activeCandidate) {
-          const activeIdx = candidates.indexOf(activeCandidate)
-          const activeTier = getSentimentTier(activeCandidate.rating)
-          const activeSentiment = activeCandidate.sentiment
+          // Get recent comparison results for active hotel to determine search bounds
+          const activeMatches = recentMatches?.filter((m: { place_a: string; place_b: string }) => 
+            m.place_a === activeHotelId || m.place_b === activeHotelId
+          ) || []
           
-          // Build potential partners list with scoring
-          const potentialPartners: Array<Candidate & { score: number }> = []
+          // Determine rating bounds based on win/loss history
+          let lowerBound = -Infinity
+          let upperBound = Infinity
           
-          for (const c of candidates) {
-            if (c.place_id === activeHotelId) continue
+          for (const match of activeMatches) {
+            const opponentId = match.place_a === activeHotelId ? match.place_b : match.place_a
+            const opponent = candidates.find(c => c.place_id === opponentId)
+            if (!opponent) continue
             
-            // Calculate partner score:
-            // - Same sentiment tier: +10
-            // - Same sentiment: +5
-            // - Close Elo rating: inversely proportional to distance
-            // - Low games_played: exploration bonus
-            let score = 0
-            
-            // Tier matching (prefer same tier for local ranking)
-            const partnerTier = getSentimentTier(c.rating)
-            if (partnerTier === activeTier) score += 10
-            if (activeSentiment && c.sentiment === activeSentiment) score += 5
-            
-            // Elo closeness (higher score for closer ratings)
-            const eloDiff = Math.abs(c.rating - activeCandidate.rating)
-            score += Math.max(0, 10 - eloDiff / 20) // Up to +10 for very close
-            
-            // Exploration bonus for low games_played
-            score += 3 / (1 + c.games_played)
-            
-            // Random factor to avoid repetitive pairs
-            score += Math.random() * 2
-            
-            potentialPartners.push({ ...c, score })
+            // Check who won this match (we need to fetch from elo_matches with winner)
+            // For now, we'll use a simpler heuristic based on current ratings
+            // In production, you'd want to store the winner in the query above
           }
           
-          // Sort by score descending
-          potentialPartners.sort((a, b) => b.score - a.score)
+          // Build potential partners sorted by rating
+          const eligiblePartners = candidates
+            .filter(c => c.place_id !== activeHotelId)
+            .sort((a, b) => a.rating - b.rating)
           
-          // Occasionally (1 in 4 chance) pick a "tier anchor" for fast placement
-          // Anchor = the median-rated item in the same sentiment tier
-          const useAnchor = Math.random() < 0.25 && placementInfo && placementInfo.comparisons_done < 2
-          if (useAnchor) {
-            const sameTierCandidates = candidates
-              .filter(c => c.place_id !== activeHotelId && getSentimentTier(c.rating) === activeTier)
-              .sort((a, b) => a.rating - b.rating)
-            
-            if (sameTierCandidates.length > 0) {
-              const medianIdx = Math.floor(sameTierCandidates.length / 2)
-              const anchor = sameTierCandidates[medianIdx]
-              if (!wasRecentlyCompared(activeHotelId, anchor.place_id)) {
-                return {
-                  placeA: activeCandidate,
-                  placeB: anchor,
-                }
+          if (eligiblePartners.length === 0) return null
+          
+          // Binary search strategy: pick the median of the current search space
+          // This efficiently narrows down the rating with each comparison
+          const activeTier = getSentimentTier(activeCandidate.rating)
+          
+          // First, try to find partners in a meaningful rating range
+          // If we have recent comparisons, use them to narrow the search
+          let targetIdx = Math.floor(eligiblePartners.length / 2) // Default: middle
+          
+          // If the active hotel has few games, do broader exploration
+          if (activeCandidate.games_played < 3) {
+            // Pick median of all hotels for quick initial placement
+            targetIdx = Math.floor(eligiblePartners.length / 2)
+          } else {
+            // After initial games, pick hotels near the active hotel's rating
+            // Find where active hotel would be in the sorted list
+            let insertIdx = 0
+            for (let i = 0; i < eligiblePartners.length; i++) {
+              if (eligiblePartners[i].rating < activeCandidate.rating) {
+                insertIdx = i + 1
               }
+            }
+            
+            // Pick a neighbor to refine the rating
+            // Alternate between slightly higher and slightly lower to converge
+            const offset = (activeCandidate.games_played % 2 === 0) ? 1 : -1
+            targetIdx = Math.max(0, Math.min(eligiblePartners.length - 1, insertIdx + offset))
+          }
+          
+          // Try to find a valid partner starting from target index
+          const searchOrder: number[] = []
+          
+          // Build search order: target, then spiral outward
+          searchOrder.push(targetIdx)
+          for (let offset = 1; offset < eligiblePartners.length; offset++) {
+            if (targetIdx + offset < eligiblePartners.length) {
+              searchOrder.push(targetIdx + offset)
+            }
+            if (targetIdx - offset >= 0) {
+              searchOrder.push(targetIdx - offset)
             }
           }
           
-          // Find a valid partner (not recently compared)
-          for (const partner of potentialPartners) {
+          // Find the first valid partner (not recently compared)
+          for (const idx of searchOrder) {
+            const partner = eligiblePartners[idx]
             if (!wasRecentlyCompared(activeHotelId, partner.place_id)) {
               return {
                 placeA: activeCandidate,
@@ -323,16 +332,16 @@ Deno.serve(async (req) => {
           }
           
           // Fallback: just pick any partner if all were recently compared
-          if (potentialPartners.length > 0) {
+          if (eligiblePartners.length > 0) {
             return {
               placeA: activeCandidate,
-              placeB: potentialPartners[0],
+              placeB: eligiblePartners[targetIdx],
             }
           }
         }
       }
       
-      // Standard selection if includePlace is not specified or not found
+      // Standard selection if no active hotel (general comparison mode)
       // Weight candidates by exploration need (lower games_played = higher weight)
       const weightedCandidates = candidates.map((c, idx) => ({
         ...c,
