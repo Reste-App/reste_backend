@@ -52,8 +52,27 @@ Deno.serve(async (req) => {
     const { userId, supabase, supabaseAdmin } = await verifyAuth(req)
 
     // Parse and validate body (place_id now comes from body)
-    const body = await req.json()
-    const data = StayBodySchema.parse(body)
+    let body: any;
+    try {
+      body = await req.json()
+    } catch (parseErr) {
+      console.error('stays: Failed to parse request body:', parseErr)
+      throw new ApiError(400, 'Invalid JSON body')
+    }
+    
+    console.log('stays: Received body:', JSON.stringify(body, null, 2))
+    
+    let data: z.infer<typeof StayBodySchema>;
+    try {
+      data = StayBodySchema.parse(body)
+    } catch (zodErr) {
+      console.error('stays: Validation error:', zodErr)
+      if (zodErr instanceof z.ZodError) {
+        const issues = zodErr.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ')
+        throw new ApiError(400, `Validation failed: ${issues}`)
+      }
+      throw new ApiError(400, 'Validation failed')
+    }
     const placeId = data.place_id
 
     // Upsert stay

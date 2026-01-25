@@ -134,8 +134,23 @@ Deno.serve(async (req) => {
       throw new ApiError(400, 'Need at least 2 BEEN hotels to battle')
     }
 
-    const placeIds = beenHotels.map((h: { place_id: string }) => h.place_id)
+    let placeIds = beenHotels.map((h: { place_id: string }) => h.place_id)
     const sentimentMap = new Map(beenHotels.map((h: { place_id: string; sentiment: string | null }) => [h.place_id, h.sentiment]))
+    
+    // IMPORTANT: If includePlace is specified but not in beenHotels yet (race condition),
+    // add it to ensure the active hotel is always available for comparison
+    if (includePlace && !placeIds.includes(includePlace)) {
+      console.log('elo-battle-pair: includePlace not in beenHotels, adding it:', includePlace)
+      placeIds = [includePlace, ...placeIds]
+      // Try to get sentiment from stays for this specific hotel
+      const { data: includePlaceStay } = await supabase
+        .from('stays')
+        .select('sentiment')
+        .eq('user_id', userId)
+        .eq('place_id', includePlace)
+        .single()
+      sentimentMap.set(includePlace, includePlaceStay?.sentiment || 'FINE')
+    }
 
     // Determine active hotel (the one we're placing)
     let activeHotelId: string | null = includePlace
