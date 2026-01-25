@@ -186,48 +186,65 @@ export async function updateStoredDisplayScores(
   supabase: ReturnType<typeof createClient>,
   userId: string
 ): Promise<number> {
-  // Fetch all BEEN hotels with ratings and sentiments
-  const { data: stays, error: staysError } = await supabase
-    .from('stays')
-    .select(`
-      place_id,
-      sentiment,
-      elo_ratings (
-        rating
-      )
-    `)
+  console.log('updateStoredDisplayScores: Starting for user', userId)
+  
+  // Fetch all elo_ratings for this user (contains the actual ratings)
+  const { data: eloRatings, error: eloError } = await supabase
+    .from('elo_ratings')
+    .select('place_id, rating')
     .eq('user_id', userId)
-    .eq('status', 'BEEN')
 
-  if (staysError || !stays || stays.length === 0) {
+  if (eloError) {
+    console.error('updateStoredDisplayScores: Error fetching elo_ratings', eloError)
     return 0
   }
 
-  // Build hotels array for scoring
-  const hotelsForScoring = stays.map((stay: any) => {
-    const eloData = Array.isArray(stay.elo_ratings) ? stay.elo_ratings[0] : stay.elo_ratings
+  if (!eloRatings || eloRatings.length === 0) {
+    console.log('updateStoredDisplayScores: No elo_ratings found for user', userId)
+    return 0
+  }
+
+  console.log('updateStoredDisplayScores: Found', eloRatings.length, 'elo_ratings')
+
+  // Build hotels array for scoring using actual Elo ratings
+  const hotelsForScoring = eloRatings.map((elo: any) => {
+    const rating = elo.rating || 1500
     return {
-      place_id: stay.place_id,
-      rating: eloData?.rating || 1500,
-      sentiment: (stay.sentiment || 'FINE') as SentimentTier,
+      place_id: elo.place_id,
+      rating,
+      // Use dynamic tier based on current Elo rating
+      sentiment: getSentimentTier(rating) as SentimentTier,
     }
   })
 
   // Compute display scores
   const displayScoreResults = computeDisplayScoresForHotels(hotelsForScoring)
+  console.log('updateStoredDisplayScores: Computed scores for', displayScoreResults.length, 'hotels')
 
   // Batch update elo_ratings with computed display scores
   let updatedCount = 0
+  const errors: string[] = []
+  
   for (const result of displayScoreResults) {
-    const { error } = await supabase
+    console.log('updateStoredDisplayScores: Updating', result.place_id, 'with score', result.displayScore)
+    
+    const { error, count } = await supabase
       .from('elo_ratings')
       .update({ display_score: result.displayScore })
       .eq('user_id', userId)
       .eq('place_id', result.place_id)
 
-    if (!error) {
+    if (error) {
+      console.error('updateStoredDisplayScores: Update error for', result.place_id, error)
+      errors.push(`${result.place_id}: ${error.message}`)
+    } else {
       updatedCount++
     }
+  }
+
+  console.log('updateStoredDisplayScores: Updated', updatedCount, 'of', displayScoreResults.length, 'hotels')
+  if (errors.length > 0) {
+    console.error('updateStoredDisplayScores: Errors:', errors)
   }
 
   return updatedCount

@@ -8,8 +8,6 @@ import {
   errorResponse, 
   corsHeaders, 
   handleCors,
-  computeDisplayScoresForHotels,
-  type SentimentTier,
 } from '../_shared/utils.ts'
 
 interface RankedHotel {
@@ -42,7 +40,7 @@ Deno.serve(async (req) => {
     // Verify authentication
     const { userId, supabase } = await verifyAuth(req)
 
-    // Get user's BEEN hotels with elo ratings and place cache
+    // Get user's BEEN hotels with elo ratings (including stored display_score) and place cache
     const { data: stays, error: queryError } = await supabase
       .from('stays')
       .select(`
@@ -51,7 +49,8 @@ Deno.serve(async (req) => {
         stayed_at,
         elo_ratings (
           rating,
-          games_played
+          games_played,
+          display_score
         ),
         place_cache (
           name,
@@ -73,21 +72,7 @@ Deno.serve(async (req) => {
       return jsonResponse({ rankings: [] })
     }
 
-    // Extract hotel data for percentile calculation
-    const hotelsForScoring = stays.map((stay: any) => {
-      const eloData = Array.isArray(stay.elo_ratings) ? stay.elo_ratings[0] : stay.elo_ratings
-      return {
-        place_id: stay.place_id,
-        rating: eloData?.rating || 1500,
-        sentiment: (stay.sentiment || 'FINE') as SentimentTier,
-      }
-    })
-
-    // Compute percentile-based display scores for all hotels
-    const displayScoreResults = computeDisplayScoresForHotels(hotelsForScoring)
-    const scoreMap = new Map(displayScoreResults.map(r => [r.place_id, r.displayScore]))
-
-    // Transform and assign scores
+    // Transform stays into rankings using stored display_score from elo_ratings
     const rankings: RankedHotel[] = stays.map((stay: any) => {
       const eloData = Array.isArray(stay.elo_ratings) ? stay.elo_ratings[0] : stay.elo_ratings
       const placeData = Array.isArray(stay.place_cache) ? stay.place_cache[0] : stay.place_cache
@@ -95,7 +80,8 @@ Deno.serve(async (req) => {
       const rating = eloData?.rating || 1500
       const gamesPlayed = eloData?.games_played || 0
       const sentiment = stay.sentiment
-      const score10 = scoreMap.get(stay.place_id) ?? 5.0 // fallback to midpoint
+      // Use the stored display_score from elo_ratings (updated after each comparison)
+      const score10 = eloData?.display_score ?? 5.0
 
       return {
         place_id: stay.place_id,

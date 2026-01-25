@@ -119,7 +119,9 @@ Deno.serve(async (req) => {
 
     // Update stored display scores for all user's hotels (tier-percentile based)
     // This ensures scores are cached in DB for efficient reads
-    await updateStoredDisplayScores(supabaseAdmin, userId)
+    console.log('elo-submit-match: Calling updateStoredDisplayScores for user', userId)
+    const updatedScoresCount = await updateStoredDisplayScores(supabaseAdmin, userId)
+    console.log('elo-submit-match: Updated', updatedScoresCount, 'display scores')
 
     // Fetch updated ratings with stored display scores for the matched pair
     const { data: updatedRatings } = await supabase

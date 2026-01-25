@@ -96,13 +96,16 @@ Deno.serve(async (req) => {
       
       if (existingRating) {
         // Rating exists - don't overwrite Elo, just update sentiment via stay
+        console.log('stays: Found existing elo_rating for', placeId, 'rating:', existingRating.rating)
         eloRating = existingRating.rating
       } else {
         // New rating - seed based on sentiment
         isNewHotel = true
         const seedRating = getSeedRating(data.sentiment || null)
+        console.log('stays: Creating new elo_rating for', placeId, 'with seed rating:', seedRating)
         
-        const { data: newRating, error: eloError } = await supabase
+        // Use supabaseAdmin to bypass RLS for insert
+        const { data: newRating, error: eloError } = await supabaseAdmin
           .from('elo_ratings')
           .insert({
             user_id: userId,
@@ -114,9 +117,10 @@ Deno.serve(async (req) => {
           .single()
 
         if (eloError) {
-          console.error('Elo rating init error:', eloError)
+          console.error('stays: Elo rating insert FAILED:', eloError.message, eloError.details, eloError.hint)
           // Non-fatal, continue
         } else {
+          console.log('stays: Elo rating inserted successfully, rating:', newRating?.rating)
           eloRating = newRating?.rating ?? seedRating
         }
 
@@ -145,16 +149,19 @@ Deno.serve(async (req) => {
 
       // Update stored display scores for all user's hotels (tier-percentile based)
       // This ensures scores are cached in DB for efficient reads
-      await updateStoredDisplayScores(supabaseAdmin, userId)
+      console.log('stays: Calling updateStoredDisplayScores for user', userId)
+      const updatedScoresCount = await updateStoredDisplayScores(supabaseAdmin, userId)
+      console.log('stays: Updated', updatedScoresCount, 'display scores')
 
       // Fetch the computed display score for this hotel
-      const { data: updatedRating } = await supabase
+      const { data: updatedRating, error: fetchError } = await supabase
         .from('elo_ratings')
         .select('display_score')
         .eq('user_id', userId)
         .eq('place_id', placeId)
         .single()
 
+      console.log('stays: Fetched display_score for', placeId, ':', updatedRating?.display_score, 'error:', fetchError?.message)
       displayScore = updatedRating?.display_score ?? 5.0
     }
 
