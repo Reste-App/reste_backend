@@ -18,18 +18,22 @@ interface PlaceDetails {
   formatted_address?: string
   phone?: string
   website?: string
-  rating?: number
-  user_rating_count?: number
   price_level?: number
   photos?: string[]
-  reviews?: any[]
   opening_hours?: any
   lat?: number
   lng?: number
-  types?: string[]
   chain?: string
   city?: string
   country?: string
+  // Containing places (restaurants, bars, etc. at the hotel)
+  containing_places?: any[]
+  // Amex benefits fields (optional)
+  program_type?: 'FHR' | 'THC' | null
+  benefits?: string[] | null
+  price_calendar_link?: string | null
+  amex_reservation_link?: string | null
+  hotelft_link?: string | null
 }
 
 Deno.serve(async (req) => {
@@ -85,7 +89,7 @@ Deno.serve(async (req) => {
       console.log(`Cache bypass requested for place_id: ${params.place_id}`)
     }
 
-    // Cache miss, expired, or refresh requested - fetch from Google
+    // Cache miss, expired, or refresh requested - fetch from Google and Amex data
     console.log(`Fetching from Google for place_id: ${params.place_id}`)
 
     const googleApiKey = Deno.env.get('GOOGLE_PLACES_API_KEY')
@@ -94,7 +98,8 @@ Deno.serve(async (req) => {
     }
 
     // Define the fields we want from Place Details (New) API
-    // This maps to the "Enterprise" pricing tier which includes reviews, rating, etc.
+    // Removed: rating, userRatingCount, reviews, types (cost savings)
+    // Added: containingPlaces (shows restaurants, bars, etc. at the hotel)
     const fieldMask = [
       'id',
       'displayName',
@@ -102,30 +107,36 @@ Deno.serve(async (req) => {
       'nationalPhoneNumber',
       'internationalPhoneNumber',
       'websiteUri',
-      'rating',
-      'userRatingCount',
       'priceLevel',
       'photos',
-      'reviews',
       'currentOpeningHours',
       'regularOpeningHours',
       'location',
-      'types',
       'addressComponents',
+      'containingPlaces',
     ].join(',')
 
     // Call Google Places Details (New) API
     const detailsUrl = `https://places.googleapis.com/v1/places/${params.place_id}?key=${googleApiKey}`
 
-    const detailsResponse = await fetch(detailsUrl, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-FieldMask': fieldMask,
-      },
-    })
+    // Fetch Google Places data and Amex hotel data in parallel for better performance
+    const [googleResponse, amexResponse] = await Promise.all([
+      fetch(detailsUrl, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-FieldMask': fieldMask,
+        },
+      }),
+      // Query Amex hotels table for program benefits and links
+      supabaseAdmin
+        .from('hotels')
+        .select('program, credit, early_checkin, free_breakfast, free_wifi, late_checkout, room_upgrade, price_calendar, amex_reservation, hotelft_link')
+        .eq('google_place_id', params.place_id)
+        .single()
+    ])
 
-    const detailsData = await detailsResponse.json()
+    const detailsData = await googleResponse.json()
 
     if (detailsData.error) {
       console.error('Google Places Details API error:', detailsData.error)
@@ -133,6 +144,26 @@ Deno.serve(async (req) => {
     }
 
     const place = detailsData
+
+    // Check if Amex data exists
+    const amexHotel = !amexResponse.error && amexResponse.data ? amexResponse.data : null
+
+    // Build benefits array from individual benefit fields
+    let benefits: string[] | null = null
+    if (amexHotel) {
+      benefits = []
+      if (amexHotel.credit) benefits.push(amexHotel.credit)
+      if (amexHotel.early_checkin) benefits.push('Early check-in')
+      if (amexHotel.free_breakfast) benefits.push('Free breakfast')
+      if (amexHotel.free_wifi) benefits.push('Free WiFi')
+      if (amexHotel.late_checkout) benefits.push('Late checkout')
+      if (amexHotel.room_upgrade) benefits.push('Room upgrade')
+      if (benefits.length === 0) benefits = null
+
+      console.log(`✅ Amex data found: ${amexHotel.program} with ${benefits?.length || 0} benefits`)
+    } else {
+      console.log(`ℹ️ No Amex data found for place_id: ${params.place_id}`)
+    }
 
     // Fetch actual photo URLs from Google Photos API and cache them
     // This saves Photo API credits on subsequent requests
@@ -207,20 +238,24 @@ Deno.serve(async (req) => {
       formatted_address: place.formattedAddress,
       phone: place.nationalPhoneNumber || place.internationalPhoneNumber,
       website: place.websiteUri,
-      rating: place.rating,
-      user_rating_count: place.userRatingCount,
       price_level: place.priceLevel,
       // Use resolved photo URLs (direct Google CDN links) instead of photo references
       // This avoids Photo API calls on every render
       photos: photoUrls.length > 0 ? photoUrls : place.photos?.map((p: any) => p.name).slice(0, 10) || [],
-      reviews: place.reviews?.slice(0, 5) || [],
       opening_hours: place.regularOpeningHours || place.currentOpeningHours,
       lat: place.location?.latitude,
       lng: place.location?.longitude,
-      types: place.types,
       chain,
       city,
       country,
+      // Add containing places (restaurants, bars, etc.)
+      containing_places: place.containingPlaces || [],
+      // Add Amex benefits data if available
+      program_type: amexHotel?.program || null,
+      benefits,
+      price_calendar_link: amexHotel?.price_calendar || null,
+      amex_reservation_link: amexHotel?.amex_reservation || null,
+      hotelft_link: amexHotel?.hotelft_link || null,
     }
 
     // Debug logging to see what we're returning
