@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from 'jsr:@supabase/supabase-js@2';
+import { verifyAuth } from '../_shared/utils.ts';
 
 const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
 const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY')!;
@@ -18,6 +19,8 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    await verifyAuth(req)
+
     // Get place_id from URL query params
     const url = new URL(req.url);
     const placeId = url.searchParams.get('place_id');

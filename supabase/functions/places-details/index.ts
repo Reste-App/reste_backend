@@ -2,7 +2,8 @@
 // Proxy for Google Places Details (New) API with 7-day caching
 
 import { z } from 'https://deno.land/x/zod@v3.22.4/mod.ts'
-import { verifyAuth, ApiError, jsonResponse, errorResponse, corsHeaders, handleCors } from '../_shared/utils.ts'
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0'
+import { verifyAuth } from '../_shared/utils.ts'
 
 const DetailsParamsSchema = z.object({
   place_id: z.string().min(1),
@@ -36,22 +37,75 @@ interface PlaceDetails {
   hotelft_link?: string | null
 }
 
+/**
+ * Custom API error class
+ */
+class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+/**
+ * Standard JSON response helper
+ */
+function jsonResponse(data: any, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders },
+  })
+}
+
+/**
+ * Error response helper
+ */
+function errorResponse(error: unknown): Response {
+  console.error('Error:', error)
+
+  if (error instanceof ApiError) {
+    return jsonResponse({ error: error.message }, error.status)
+  }
+
+  if (error instanceof Error) {
+    return jsonResponse({ error: error.message }, 500)
+  }
+
+  return jsonResponse({ error: 'Internal server error' }, 500)
+}
+
+/**
+ * CORS headers for edge functions
+ */
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+}
+
+/**
+ * Handle CORS preflight
+ */
+function handleCors(req: Request): Response | null {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders })
+  }
+  return null
+}
+
 Deno.serve(async (req) => {
   // Handle CORS
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
   try {
+    await verifyAuth(req)
+
     // Get environment variables for Supabase admin
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-    const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2.39.0')
 
     // Create admin client (bypasses RLS for caching)
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey)
-
-    // Note: Authentication is optional for this function during testing
-    // In production, you should verify the user's JWT token here
 
     // Parse and validate query params
     const url = new URL(req.url)
@@ -140,7 +194,7 @@ Deno.serve(async (req) => {
 
     if (detailsData.error) {
       console.error('Google Places Details API error:', detailsData.error)
-      throw new ApiError(500, `Google Places API error: ${detailsData.error.message}`)
+      throw new ApiError(500, `Google Places API error: ${detailsData.error.message || detailsData.error.status || 'Unknown error'}`)
     }
 
     const place = detailsData

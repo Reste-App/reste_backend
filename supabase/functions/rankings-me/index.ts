@@ -1,57 +1,34 @@
-// Rankings Edge Function
-// GET /rankings/me - Get user's ranked list of BEEN hotels
-
-import { 
-  verifyAuth, 
-  ApiError, 
-  jsonResponse, 
-  errorResponse, 
-  corsHeaders, 
+import {
+  verifyAuth,
+  ApiError,
+  jsonResponse,
+  errorResponse,
   handleCors,
+  computeDisplayScore,
+  DISPLAY_SCORE_BANDS,
+  type SentimentTier,
 } from '../_shared/utils.ts'
 
-interface RankedHotel {
-  place_id: string
-  name: string
-  address?: string
-  city?: string
-  country?: string
-  chain?: string
-  rating: number // Elo rating
-  games_played: number
-  sentiment: string
-  score10: number // Computed score out of 10 (tier-percentile based)
-  tier: string // LIKED | FINE | DISLIKED
-  stayed_at?: string
-  photo?: string
-}
+const TIER_ORDER: SentimentTier[] = ['LIKED', 'FINE', 'DISLIKED']
 
 Deno.serve(async (req) => {
-  // Handle CORS
   const corsResponse = handleCors(req)
   if (corsResponse) return corsResponse
 
   try {
-    // Only allow GET
     if (req.method !== 'GET') {
       throw new ApiError(405, 'Method not allowed')
     }
 
-    // Verify authentication
     const { userId, supabase } = await verifyAuth(req)
 
-    // Get user's BEEN hotels with elo ratings (including stored display_score) and place cache
     const { data: stays, error: queryError } = await supabase
       .from('stays')
       .select(`
         place_id,
         sentiment,
+        rank_in_tier,
         stayed_at,
-        elo_ratings (
-          rating,
-          games_played,
-          display_score
-        ),
         place_cache (
           name,
           city,
@@ -69,19 +46,28 @@ Deno.serve(async (req) => {
     }
 
     if (!stays || stays.length === 0) {
-      return jsonResponse({ rankings: [] })
+      return jsonResponse({ rankings: [], total: 0 })
     }
 
-    // Transform stays into rankings using stored display_score from elo_ratings
-    const rankings: RankedHotel[] = stays.map((stay: any) => {
-      const eloData = Array.isArray(stay.elo_ratings) ? stay.elo_ratings[0] : stay.elo_ratings
-      const placeData = Array.isArray(stay.place_cache) ? stay.place_cache[0] : stay.place_cache
-      
-      const rating = eloData?.rating || 1500
-      const gamesPlayed = eloData?.games_played || 0
-      const sentiment = stay.sentiment
-      // Use the stored display_score from elo_ratings (updated after each comparison)
-      const score10 = eloData?.display_score ?? 5.0
+    // Count placed hotels per tier for display score calculation
+    const tierCounts = new Map<string, number>()
+    for (const s of stays) {
+      if (s.rank_in_tier !== null && s.sentiment) {
+        tierCounts.set(s.sentiment, (tierCounts.get(s.sentiment) ?? 0) + 1)
+      }
+    }
+
+    const rankings = stays.map((stay: any) => {
+      const placeData = Array.isArray(stay.place_cache)
+        ? stay.place_cache[0]
+        : stay.place_cache
+
+      const sentiment = (stay.sentiment as SentimentTier) || 'FINE'
+      const totalInTier = tierCounts.get(sentiment) ?? 0
+      const ranked = stay.rank_in_tier !== null
+      const displayScore = ranked
+        ? computeDisplayScore(stay.rank_in_tier, totalInTier, sentiment)
+        : null
 
       return {
         place_id: stay.place_id,
@@ -89,26 +75,25 @@ Deno.serve(async (req) => {
         city: placeData?.city,
         country: placeData?.country,
         chain: placeData?.chain,
-        rating,
-        games_played: gamesPlayed,
         sentiment,
-        score10,
-        tier: sentiment || 'FINE',
+        tier: sentiment,
+        rankInTier: stay.rank_in_tier,
+        displayScore,
         stayed_at: stay.stayed_at,
         photo: placeData?.details?.photos?.[0],
       }
     })
 
-    // Sort by score10 descending (respects Beli-style tiers)
-    // LIKED hotels always on top, then FINE, then DISLIKED
-    // Within each tier, sorted by percentile rank (reflected in score10)
-    rankings.sort((a, b) => b.score10 - a.score10)
-
-    return jsonResponse({
-      rankings,
-      total: rankings.length,
+    // Sort: LIKED desc by rank, then FINE desc, then DISLIKED desc.
+    // Unranked hotels (displayScore === null) go at the end.
+    rankings.sort((a: any, b: any) => {
+      if (a.displayScore === null && b.displayScore === null) return 0
+      if (a.displayScore === null) return 1
+      if (b.displayScore === null) return -1
+      return b.displayScore - a.displayScore
     })
 
+    return jsonResponse({ rankings, total: rankings.length })
   } catch (error) {
     return errorResponse(error)
   }

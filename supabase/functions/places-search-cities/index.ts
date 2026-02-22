@@ -3,6 +3,7 @@
 
 import { z } from 'https://deno.land/x/zod@v3.22.4/mod.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0'
+import { verifyAuth } from '../_shared/utils.ts'
 
 const CitySearchParamsSchema = z.object({
   input: z.string().min(1),
@@ -88,6 +89,8 @@ Deno.serve(async (req) => {
   if (corsResponse) return corsResponse
 
   try {
+    await verifyAuth(req)
+
     // Get environment variables for Supabase admin
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!
     const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!

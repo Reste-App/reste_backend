@@ -29,12 +29,14 @@ CREATE INDEX IF NOT EXISTS idx_hotels_name ON hotels USING gin(to_tsvector('engl
 ALTER TABLE hotels ENABLE ROW LEVEL SECURITY;
 
 -- Policy: Allow all authenticated users to read hotels
+DROP POLICY IF EXISTS "Allow authenticated users to read hotels" ON hotels;
 CREATE POLICY "Allow authenticated users to read hotels"
 ON hotels FOR SELECT
 TO authenticated
 USING (true);
 
 -- Policy: Allow service role to insert/update/delete hotels
+DROP POLICY IF EXISTS "Allow service role to manage hotels" ON hotels;
 CREATE POLICY "Allow service role to manage hotels"
 ON hotels FOR ALL
 TO service_role

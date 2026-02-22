@@ -1,126 +1,13 @@
 // Vibe Summary Edge Function
 // GET /vibe-summary?place_id=xxx - Get or generate AI summary for a hotel
 
+import {
+  ApiError,
+  jsonResponse,
+  errorResponse,
+  handleCors,
+} from '../_shared/utils.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0'
-
-// =============================================================================
-// Inlined Utilities (from _shared/utils.ts)
-// =============================================================================
-
-/**
- * Custom API error class
- */
-export class ApiError extends Error {
-  constructor(public status: number, message: string) {
-    super(message)
-    this.name = 'ApiError'
-  }
-}
-
-/**
- * Standard JSON response helper with CORS headers
- */
-export function jsonResponse(data: any, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      'Content-Type': 'application/json',
-      ...corsHeaders,
-    },
-  })
-}
-
-/**
- * Error response helper with CORS headers
- */
-export function errorResponse(error: unknown): Response {
-  console.error('Error:', error)
-
-  if (error instanceof ApiError) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: error.status,
-      headers: {
-        'Content-Type': 'application/json',
-        ...corsHeaders,
-      },
-    })
-  }
-
-  if (error instanceof Error) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      status: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        ...corsHeaders,
-      },
-    })
-  }
-
-  return new Response(JSON.stringify({ error: 'Internal server error' }), {
-    status: 500,
-    headers: {
-      'Content-Type': 'application/json',
-      ...corsHeaders,
-    },
-  })
-}
-
-/**
- * CORS headers for edge functions
- */
-export const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-}
-
-/**
- * Handle CORS preflight
- */
-export function handleCors(req: Request): Response | null {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
-  }
-  return null
-}
-
-/**
- * Verify JWT token and return authenticated user ID + Supabase clients
- */
-export async function verifyAuth(req: Request): Promise<{ userId: string; supabaseAdmin: any }> {
-  const authHeader = req.headers.get('Authorization')
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    throw new ApiError(401, 'Missing or invalid Authorization header')
-  }
-
-  const token = authHeader.replace('Bearer ', '')
-  const supabaseUrl = Deno.env.get('SUPABASE_URL')!
-  const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY')!
-  const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-
-  // Client for user-scoped operations (with RLS)
-  const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-    global: { headers: { Authorization: authHeader } },
-  })
-
-  // Admin client for service-level operations (bypasses RLS)
-  const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey)
-
-  // Verify token and get user
-  const { data: { user }, error } = await supabase.auth.getUser(token)
-
-  if (error || !user) {
-    throw new ApiError(401, 'Invalid or expired token')
-  }
-
-  return {
-    userId: user.id,
-    supabaseAdmin,
-  }
-}
-
-// =============================================================================
-// Vibe Summary Logic
-// =============================================================================
 
 // Category configuration with icons
 const CATEGORY_CONFIG: Record<string, { icon: string; label: string }> = {
@@ -401,22 +288,13 @@ Deno.serve(async (req) => {
   if (corsResponse) return corsResponse
 
   try {
-    // Allow GET without auth for public summaries, but track if authenticated
-    let userId: string | null = null
-    let supabaseAdmin: any
-
-    // Try to get auth context
-    try {
-      const authContext = await verifyAuth(req)
-      userId = authContext.userId
-      supabaseAdmin = authContext.supabaseAdmin
-    } catch {
-      // Create admin client for unauthenticated requests
-      supabaseAdmin = createClient(
-        Deno.env.get('SUPABASE_URL')!,
-        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-      )
-    }
+    // Vibe summaries are intentionally public — they aggregate responses across all
+    // users for a given hotel and are shown on the hotel detail page without login.
+    // No auth is required or attempted.
+    const supabaseAdmin = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+    )
 
     // Only allow GET
     if (req.method !== 'GET') {
