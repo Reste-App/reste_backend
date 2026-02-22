@@ -1,14 +1,13 @@
 // Vibe Summary Edge Function
 // GET /vibe-summary?place_id=xxx - Get or generate AI summary for a hotel
 
-import { 
-  verifyAuth, 
-  ApiError, 
-  jsonResponse, 
-  errorResponse, 
-  corsHeaders, 
+import {
+  ApiError,
+  jsonResponse,
+  errorResponse,
   handleCors,
 } from '../_shared/utils.ts'
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0'
 
 // Category configuration with icons
 const CATEGORY_CONFIG: Record<string, { icon: string; label: string }> = {
@@ -244,23 +243,13 @@ Deno.serve(async (req) => {
   if (corsResponse) return corsResponse
 
   try {
-    // Allow GET without auth for public summaries, but track if authenticated
-    let userId: string | null = null
-    let supabaseAdmin: any
-
-    // Try to get auth context
-    try {
-      const authContext = await verifyAuth(req)
-      userId = authContext.userId
-      supabaseAdmin = authContext.supabaseAdmin
-    } catch {
-      // Create admin client for unauthenticated requests
-      const { createClient } = await import('https://esm.sh/@supabase/supabase-js@2.39.0')
-      supabaseAdmin = createClient(
-        Deno.env.get('SUPABASE_URL')!,
-        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
-      )
-    }
+    // Vibe summaries are intentionally public — they aggregate responses across all
+    // users for a given hotel and are shown on the hotel detail page without login.
+    // No auth is required or attempted.
+    const supabaseAdmin = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+    )
 
     // Only allow GET
     if (req.method !== 'GET') {

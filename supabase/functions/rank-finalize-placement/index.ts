@@ -5,7 +5,6 @@ import {
   jsonResponse,
   errorResponse,
   handleCors,
-  computeDisplayScore,
   type SentimentTier,
 } from '../_shared/utils.ts'
 
@@ -60,14 +59,10 @@ Deno.serve(async (req) => {
       throw new ApiError(500, `Failed to finalize placement: ${rpcError.message}`)
     }
 
-    const newTotal = currentTotal + 1
-    const displayScore = computeDisplayScore(rankInTier, newTotal, sentiment)
-
     return jsonResponse({
       status: 'placed',
       rankInTier,
-      totalInTier: newTotal,
-      displayScore,
+      totalInTier: currentTotal + 1,
     })
   } catch (error) {
     return errorResponse(error)
