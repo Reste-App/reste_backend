@@ -1,13 +1,126 @@
 // Vibe Summary Edge Function
 // GET /vibe-summary?place_id=xxx - Get or generate AI summary for a hotel
 
-import {
-  ApiError,
-  jsonResponse,
-  errorResponse,
-  handleCors,
-} from '../_shared/utils.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0'
+
+// =============================================================================
+// Inlined Utilities (from _shared/utils.ts)
+// =============================================================================
+
+/**
+ * Custom API error class
+ */
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
+/**
+ * Standard JSON response helper with CORS headers
+ */
+export function jsonResponse(data: any, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      ...corsHeaders,
+    },
+  })
+}
+
+/**
+ * Error response helper with CORS headers
+ */
+export function errorResponse(error: unknown): Response {
+  console.error('Error:', error)
+
+  if (error instanceof ApiError) {
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: error.status,
+      headers: {
+        'Content-Type': 'application/json',
+        ...corsHeaders,
+      },
+    })
+  }
+
+  if (error instanceof Error) {
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: {
+        'Content-Type': 'application/json',
+        ...corsHeaders,
+      },
+    })
+  }
+
+  return new Response(JSON.stringify({ error: 'Internal server error' }), {
+    status: 500,
+    headers: {
+      'Content-Type': 'application/json',
+      ...corsHeaders,
+    },
+  })
+}
+
+/**
+ * CORS headers for edge functions
+ */
+export const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+}
+
+/**
+ * Handle CORS preflight
+ */
+export function handleCors(req: Request): Response | null {
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders })
+  }
+  return null
+}
+
+/**
+ * Verify JWT token and return authenticated user ID + Supabase clients
+ */
+export async function verifyAuth(req: Request): Promise<{ userId: string; supabaseAdmin: any }> {
+  const authHeader = req.headers.get('Authorization')
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    throw new ApiError(401, 'Missing or invalid Authorization header')
+  }
+
+  const token = authHeader.replace('Bearer ', '')
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')!
+  const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY')!
+  const supabaseServiceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+
+  // Client for user-scoped operations (with RLS)
+  const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+    global: { headers: { Authorization: authHeader } },
+  })
+
+  // Admin client for service-level operations (bypasses RLS)
+  const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey)
+
+  // Verify token and get user
+  const { data: { user }, error } = await supabase.auth.getUser(token)
+
+  if (error || !user) {
+    throw new ApiError(401, 'Invalid or expired token')
+  }
+
+  return {
+    userId: user.id,
+    supabaseAdmin,
+  }
+}
+
+// =============================================================================
+// Vibe Summary Logic
+// =============================================================================
 
 // Category configuration with icons
 const CATEGORY_CONFIG: Record<string, { icon: string; label: string }> = {
@@ -37,9 +150,16 @@ interface CategorySummary {
   negative: number
 }
 
+interface FollowUpQuestion {
+  question: string
+  answer: string
+  sourceDetails: string[]
+}
+
 interface GeminiResponse {
   summary: string
   categories: CategorySummary[]
+  followUpQuestions: FollowUpQuestion[]
 }
 
 /**
@@ -77,8 +197,9 @@ async function generateSummaryWithGemini(
   const prompt = `You are analyzing guest feedback for a hotel called "${hotelName}".
 
 Based on these guest responses, generate:
-1. A brief 1-2 sentence overall summary (max 120 characters) that captures the key sentiment
+1. A 2-3 sentence overall summary (max 200 characters) that captures key themes and insights
 2. For each category that has responses, generate a detailed insight paragraph and calculate sentiment breakdown
+3. CRITICAL: Extract 1-3 specific factual details mentioned by guests and convert them into follow-up questions
 
 Guest responses:
 ${responsesText}
@@ -88,7 +209,7 @@ ${categoriesForPrompt}
 
 IMPORTANT: Return ONLY valid JSON in this exact format, no markdown or extra text:
 {
-  "summary": "Brief overall summary capturing key themes...",
+  "summary": "Key themes and insights from guest feedback...",
   "categories": [
     {
       "id": "bedding",
@@ -96,24 +217,55 @@ IMPORTANT: Return ONLY valid JSON in this exact format, no markdown or extra tex
       "label": "Bedding",
       "count": 5,
       "title": "What guests say about Bedding",
-      "text": "Detailed insight paragraph based on guest responses...",
+      "text": "2-3 sentence detailed insight with key themes...",
       "positive": 80,
       "neutral": 15,
       "negative": 5
     }
+  ],
+  "followUpQuestions": [
+    {
+      "question": "What toiletry brand do they use?",
+      "answer": "According to guests, the hotel uses Lullabo toiletries.",
+      "sourceDetails": ["Lullabo toiletries mentioned in responses"]
+    },
+    {
+      "question": "What type of bedding?",
+      "answer": "Reviews mention Marriott bedding with premium linens.",
+      "sourceDetails": ["Marriott bedding mentioned"]
+    }
   ]
 }
 
-Rules:
-- Keep summary under 120 characters
-- Each category text should be 2-3 sentences
-- Sentiment percentages must add up to 100
-- Only include categories that have actual responses
-- Base sentiment breakdown on the actual good/fine/bad ratings in responses`
+Rules for Summary:
+- 2-3 sentences that capture key themes and insights
+- Focus on what guests consistently mention (patterns, not outliers)
+- Include specific themes (e.g., "amazing city views", "comfortable bedding")
+- Max 200 characters
+
+Rules for Category Text:
+- 2-3 sentences per category
+- Highlight key themes and patterns
+- Mention specific details if multiple guests agree
+- More detailed than just sentiment
+
+CRITICAL Rules for Follow-up Questions (MUST GENERATE 1-3 IF SPECIFIC DETAILS EXIST):
+- Extract 1-3 specific factual details (brands, amenities, features, room types, landmarks)
+- Look for: brand names (Lullabo, Marriott, Keurig), specific amenities (rainfall shower, coffee maker), room features (corner room, lake view), landmarks (Downtown Chicago)
+- Each detail MUST become a follow-up question with pre-generated answer
+- Questions should be natural: "What [X] do they have?", "What type of [X]?"
+- Answers must quote what guests said
+- sourceDetails should list the specific phrases from responses
+- You MUST generate follow-up questions if guests mention specific brands, amenities, or features
+- Only return empty array if responses are generic with no specific details
+
+Rules for Sentiment:
+- Percentages must add up to 100 for each category
+- Base percentages on actual good/fine/bad ratings in responses`
 
   // Call Gemini API
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: {
@@ -142,7 +294,7 @@ Rules:
   }
 
   const geminiResult = await response.json()
-  
+
   // Extract text from Gemini response
   const generatedText = geminiResult.candidates?.[0]?.content?.parts?.[0]?.text
   if (!generatedText) {
@@ -165,6 +317,12 @@ Rules:
 
   try {
     const parsed = JSON.parse(jsonText) as GeminiResponse
+    // Log the parsed response to debug follow-up questions
+    console.log('Gemini parsed response:', JSON.stringify({
+      summary: parsed.summary,
+      followUpQuestionsCount: parsed.followUpQuestions?.length || 0,
+      followUpQuestions: parsed.followUpQuestions
+    }, null, 2))
     return parsed
   } catch (parseError) {
     console.error('Failed to parse Gemini response:', jsonText)
@@ -211,16 +369,16 @@ function generateFallbackSummary(responses: VibeResponse[]): GeminiResponse {
   const categories: CategorySummary[] = []
   for (const [catId, catResponses] of categoryGroups) {
     const config = CATEGORY_CONFIG[catId] || { icon: '📝', label: catId }
-    
+
     let positive = 0, neutral = 0, negative = 0
     for (const r of catResponses) {
       if (r.sentiment === 'good') positive++
       else if (r.sentiment === 'fine') neutral++
       else negative++
     }
-    
+
     const catTotal = catResponses.length || 1
-    
+
     categories.push({
       id: catId,
       icon: config.icon,
@@ -234,7 +392,7 @@ function generateFallbackSummary(responses: VibeResponse[]): GeminiResponse {
     })
   }
 
-  return { summary, categories }
+  return { summary, categories, followUpQuestions: [] }
 }
 
 Deno.serve(async (req) => {
@@ -243,13 +401,22 @@ Deno.serve(async (req) => {
   if (corsResponse) return corsResponse
 
   try {
-    // Vibe summaries are intentionally public — they aggregate responses across all
-    // users for a given hotel and are shown on the hotel detail page without login.
-    // No auth is required or attempted.
-    const supabaseAdmin = createClient(
-      Deno.env.get('SUPABASE_URL')!,
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
-    )
+    // Allow GET without auth for public summaries, but track if authenticated
+    let userId: string | null = null
+    let supabaseAdmin: any
+
+    // Try to get auth context
+    try {
+      const authContext = await verifyAuth(req)
+      userId = authContext.userId
+      supabaseAdmin = authContext.supabaseAdmin
+    } catch {
+      // Create admin client for unauthenticated requests
+      supabaseAdmin = createClient(
+        Deno.env.get('SUPABASE_URL')!,
+        Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+      )
+    }
 
     // Only allow GET
     if (req.method !== 'GET') {
@@ -263,7 +430,10 @@ Deno.serve(async (req) => {
       throw new ApiError(400, 'place_id query parameter is required')
     }
 
-    // Check for cached summary that hasn't expired
+    // Check for refresh parameter to bypass cache
+    const refresh = url.searchParams.get('refresh') === 'true'
+
+    // Check for cached summary that hasn't expired (unless refresh=true)
     const { data: cachedSummary } = await supabaseAdmin
       .from('vibe_summaries')
       .select('*')
@@ -271,13 +441,14 @@ Deno.serve(async (req) => {
       .single()
 
     const now = new Date()
-    if (cachedSummary && new Date(cachedSummary.expires_at) > now) {
+    if (!refresh && cachedSummary && new Date(cachedSummary.expires_at) > now) {
       // Return cached summary
       return jsonResponse({
         place_id: placeId,
         summary_text: cachedSummary.summary_text,
         total_responses: cachedSummary.total_responses,
         categories: cachedSummary.categories,
+        follow_up_questions: cachedSummary.follow_up_questions || [],
         generated_at: cachedSummary.generated_at,
         cached: true,
       })
@@ -301,6 +472,7 @@ Deno.serve(async (req) => {
         summary_text: null,
         total_responses: 0,
         categories: [],
+        follow_up_questions: [],
         generated_at: null,
         cached: false,
       })
@@ -334,6 +506,7 @@ Deno.serve(async (req) => {
         summary_text: generatedSummary.summary,
         total_responses: responses.length,
         categories: generatedSummary.categories,
+        follow_up_questions: generatedSummary.followUpQuestions || [],
         generated_at: now.toISOString(),
         expires_at: expiresAt.toISOString(),
         updated_at: now.toISOString(),
@@ -346,6 +519,7 @@ Deno.serve(async (req) => {
       summary_text: generatedSummary.summary,
       total_responses: responses.length,
       categories: generatedSummary.categories,
+      follow_up_questions: generatedSummary.followUpQuestions || [],
       generated_at: now.toISOString(),
       cached: false,
     })
